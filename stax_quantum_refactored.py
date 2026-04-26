@@ -538,4 +538,185 @@ if not st.session_state.user:
                         if not valid:
                             st.error(f"Username: {msg}")
                         else:
-                            valid, msg = InputValidator.val
+                            valid, msg = InputValidator.validate_password(p)
+                            if not valid:
+                                st.error(f"Password: {msg}")
+                            else:
+                                if st.session_state.db.user_exists(u):
+                                    st.error("Username already exists")
+                                else:
+                                    pw_hash = PasswordManager.hash_password(p)
+                                    if st.session_state.db.create_user(u, pw_hash):
+                                        st.success("Enrollment Successful! You can now login.")
+                                        st.rerun()
+                                    else:
+                                        st.error("Enrollment failed. Please try again.")
+                    except Exception as e:
+                        st.error(f"Registration error: {e}")
+else:
+    # ==================== MAIN APP UI ====================
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("<h2 style='color: #00B4D8;'>⚙️ CONTROL PANEL</h2>", unsafe_allow_html=True)
+        
+        page = st.radio(
+            "Navigation",
+            ["📊 Dashboard", "💼 Portfolio", "📈 Analytics", "🔧 Settings"],
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("---")
+        
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.user = None
+            st.session_state.binance_client = None
+            logger.info(f"User logged out: {u}")
+            st.rerun()
+    
+    # Main content
+    st.markdown(f"<p style='text-align: right; color: #778DA9; font-size: 12px;'>👤 Session: <span class='stax-cyan'>{st.session_state.user}</span></p>", unsafe_allow_html=True)
+    
+    if page == "📊 Dashboard":
+        st.markdown("<h2 class='stax-cyan'>Market Overview</h2>", unsafe_allow_html=True)
+        
+        ticker_col, period_col = st.columns(2)
+        with ticker_col:
+            selected_ticker = st.selectbox("Select Asset", CONFIG.VALID_TICKERS)
+        with period_col:
+            period = st.selectbox("Period", ["5d", "1mo", "3mo"])
+        
+        if selected_ticker:
+            df = MarketDataFetcher.fetch(selected_ticker, period=period)
+            
+            if not df.empty:
+                # Display price chart
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=df.index,
+                    open=df['Open'],
+                    high=df['High'],
+                    low=df['Low'],
+                    close=df['Close']
+                ))
+                fig.update_layout(
+                    title=f"{selected_ticker} - Price Action",
+                    yaxis_title="Price",
+                    template="plotly_dark",
+                    xaxis_rangeslider_visible=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Metrics
+                current_price = df['Close'].iloc[-1]
+                price_change = df['Close'].iloc[-1] - df['Close'].iloc[0]
+                pct_change = (price_change / df['Close'].iloc[0]) * 100
+                
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Current Price", f"${current_price:.2f}")
+                col2.metric("Change", f"${price_change:.2f}", f"{pct_change:.2f}%")
+                col3.metric("High", f"${df['High'].max():.2f}")
+                col4.metric("Low", f"${df['Low'].min():.2f}")
+            else:
+                st.error("Unable to fetch market data")
+    
+    elif page == "💼 Portfolio":
+        st.markdown("<h2 class='stax-cyan'>Your Holdings</h2>", unsafe_allow_html=True)
+        
+        portfolio_df = st.session_state.db.get_user_portfolio(st.session_state.user)
+        
+        if not portfolio_df.empty:
+            st.dataframe(portfolio_df, use_container_width=True)
+        else:
+            st.info("Your portfolio is empty. Start trading!")
+        
+        st.markdown("<h3 class='stax-mint'>Place Order</h3>", unsafe_allow_html=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            ticker = st.selectbox("Asset", CONFIG.VALID_TICKERS, key="order_ticker")
+        with col2:
+            amount = st.number_input("Amount", min_value=CONFIG.MIN_ORDER_AMOUNT, max_value=CONFIG.MAX_ORDER_AMOUNT)
+        
+        if st.button("Execute Order", use_container_width=True):
+            valid, msg = InputValidator.validate_ticker(ticker)
+            if not valid:
+                st.error(msg)
+            else:
+                valid, msg = InputValidator.validate_order_amount(amount)
+                if not valid:
+                    st.error(msg)
+                else:
+                    # Get current price
+                    df = MarketDataFetcher.fetch(ticker)
+                    if not df.empty:
+                        entry_price = df['Close'].iloc[-1]
+                        if st.session_state.db.add_portfolio_entry(st.session_state.user, ticker, amount, entry_price):
+                            st.success(f"Order placed: {amount} {ticker} @ ${entry_price:.2f}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to place order")
+    
+    elif page == "📈 Analytics":
+        st.markdown("<h2 class='stax-cyan'>Price Forecast</h2>", unsafe_allow_html=True)
+        
+        ticker = st.selectbox("Select Asset for Forecast", CONFIG.VALID_TICKERS, key="forecast_ticker")
+        
+        if st.button("Generate Forecast", use_container_width=True):
+            df = MarketDataFetcher.fetch(ticker, period="3mo")
+            
+            if not df.empty and len(df) > CONFIG.LSTM_LOOKBACK:
+                prices = df['Close'].values
+                forecast = LSTMPredictor.forecast(tuple(prices))
+                
+                if forecast:
+                    current_price = prices[-1]
+                    change = forecast - current_price
+                    pct_change = (change / current_price) * 100
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Current Price", f"${current_price:.2f}")
+                    col2.metric("Forecast", f"${forecast:.2f}")
+                    col3.metric("Predicted Change", f"{pct_change:.2f}%")
+                else:
+                    st.warning("Forecast generation failed")
+            else:
+                st.error("Insufficient data for forecast")
+    
+    elif page == "🔧 Settings":
+        st.markdown("<h2 class='stax-cyan'>Account Settings</h2>", unsafe_allow_html=True)
+        
+        st.info(f"User: {st.session_state.user}")
+        
+        with st.expander("Change Password"):
+            current_pass = st.text_input("Current Password", type="password")
+            new_pass = st.text_input("New Password", type="password")
+            confirm_pass = st.text_input("Confirm Password", type="password")
+            
+            if st.button("Update Password"):
+                pw_hash = PasswordManager.hash_password(current_pass)
+                if st.session_state.db.verify_credentials(st.session_state.user, pw_hash):
+                    if new_pass == confirm_pass:
+                        new_pw_hash = PasswordManager.hash_password(new_pass)
+                        st.session_state.db.conn.execute(
+                            "UPDATE users SET password=? WHERE username=?",
+                            (new_pw_hash, st.session_state.user)
+                        )
+                        st.session_state.db.conn.commit()
+                        st.success("Password updated successfully")
+                    else:
+                        st.error("Passwords do not match")
+                else:
+                    st.error("Current password is incorrect")
+        
+        with st.expander("Binance API Configuration"):
+            api_key = st.text_input("API Key", type="password")
+            secret_key = st.text_input("Secret Key", type="password")
+            
+            if st.button("Connect Binance"):
+                try:
+                    trader = BinanceTrader(api_key, secret_key, testnet=True)
+                    st.session_state.binance_client = trader
+                    st.success("Binance connected successfully!")
+                except Exception as e:
+                    st.error(f"Connection failed: {e}")
